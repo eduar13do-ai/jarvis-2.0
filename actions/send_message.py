@@ -11,18 +11,10 @@ pyautogui.FAILSAFE = True
 pyautogui.PAUSE = 0.08
 
 def _open_app(app_name: str) -> bool:
-    """Opens an app via Windows search."""
-    try:
-        pyautogui.press("win")
-        time.sleep(0.4)
-        pyautogui.write(app_name, interval=0.04)
-        time.sleep(0.5)
-        pyautogui.press("enter")
-        time.sleep(2.0)  
-        return True
-    except Exception as e:
-        print(f"[SendMessage] Could not open {app_name}: {e}")
-        return False
+    """Opens an app using the robust launcher."""
+    from actions.open_app import open_app
+    res = open_app({"app_name": app_name})
+    return "successfully" in res or "Opened" in res or "confirm" in res
 
 
 def _search_contact(contact: str, platform: str):

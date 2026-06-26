@@ -188,29 +188,37 @@ class _BrowserThread:
 
     async def _launch_browser_if_needed(self):
         """
-        Tarayıcıyı başlatır. Zaten açıksa hiçbir şey yapmaz.
-        Her zaman default tarayıcıyı kullanır, özel sekme açmaz.
+        Starts the browser with a persistent context to preserve user login sessions (like WhatsApp Web).
         """
-        if self._browser and self._browser.is_connected():
+        if self._context:
             return
+
+        base_dir = Path(__file__).resolve().parent.parent
+        profile_dir = base_dir / "config" / "jarvis_browser_profile"
+        profile_dir.mkdir(parents=True, exist_ok=True)
 
         prog_id = _get_default_browser_id()
         self._engine_name, self._exe_path, self._channel, self._is_opera = _find_browser_executable(prog_id)
+        
+        # Use detected engine or default to chromium
         engine = getattr(self._playwright, self._engine_name)
 
-        # Temel chromium argümanları
         chromium_args = ["--start-maximized"]
-
         if self._is_opera:
-            # Opera GX bazı sürümlerde varsayılan olarak private modda başlar.
-            # Aşağıdaki flag'ler bunu engeller.
             chromium_args += [
                 "--disable-features=OperaPrivacyMode",
                 "--no-private",
             ]
-            print("[Browser] 🎭 Opera detected — disabling private-mode flags")
 
-        launch_kwargs = {"headless": False}
+        launch_kwargs = {
+            "headless": False,
+            "viewport": None,
+            "user_agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            )
+        }
         if self._engine_name == "chromium":
             launch_kwargs["args"] = chromium_args
         if self._exe_path:
@@ -219,40 +227,39 @@ class _BrowserThread:
             launch_kwargs["channel"] = self._channel
 
         try:
-            self._browser = await engine.launch(**launch_kwargs)
-            print(
-                f"[Browser] ✅ Launched ({self._engine_name}"
-                f"{' / ' + self._channel if self._channel else ''}"
-                f"{' / ' + self._exe_path if self._exe_path else ''})"
+            print(f"[Browser] 📂 Launching persistent context at: {profile_dir}")
+            self._context = await engine.launch_persistent_context(
+                user_data_dir=str(profile_dir),
+                **launch_kwargs
             )
+            print(f"[Browser] ✅ Persistent context launched successfully ({self._engine_name})")
         except Exception as e:
-            print(f"[Browser] ⚠️ Launch failed ({e}), falling back to built-in Chromium")
-            self._browser = await self._playwright.chromium.launch(
-                headless=False,
-                args=["--start-maximized"]
-            )
+            print(f"[Browser] ⚠️ Persistent launch failed ({e}), falling back to built-in Chromium persistent context")
+            try:
+                self._context = await self._playwright.chromium.launch_persistent_context(
+                    user_data_dir=str(profile_dir),
+                    headless=False,
+                    viewport=None,
+                    args=["--start-maximized"]
+                )
+                print("[Browser] ✅ Fallback persistent context launched successfully")
+            except Exception as e2:
+                print(f"[Browser] ❌ Fallback persistent launch failed: {e2}")
+                raise
 
     async def _get_page(self):
         """
-        Mevcut sayfayı döndürür.
-        - Tarayıcı kapalıysa açar.
-        - Context yoksa oluşturur.
-        - Sayfa kapalıysa yeni sekme açar (aynı pencerede).
-        - Sayfa zaten açıksa aynı sayfayı döndürür (yeni pencere açmaz).
+        Returns the current active page. Opens a tab if none exists.
         """
         await self._launch_browser_if_needed()
 
-        if self._context is None:
-            self._context = await self._browser.new_context(
-                viewport=None,
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/120.0.0.0 Safari/537.36"
-                )
-            )
+        pages = self._context.pages
+        if pages:
+            self._page = pages[0]
+        else:
+            self._page = await self._context.new_page()
 
-        if self._page is None or self._page.is_closed():
+        if self._page.is_closed():
             self._page = await self._context.new_page()
 
         return self._page
@@ -395,11 +402,11 @@ class _BrowserThread:
         return f"Could not find input: '{description}'"
 
     async def _close_browser(self) -> str:
-        if self._browser:
-            await self._browser.close()
-            self._browser = None
+        if self._context:
+            await self._context.close()
             self._context = None
             self._page    = None
+        self._browser = None
 
         if self._playwright:
             await self._playwright.stop()

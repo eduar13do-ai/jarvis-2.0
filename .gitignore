@@ -1,0 +1,19 @@
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# IDE/Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Sensitive configuration and API keys
+config/api_keys.json
+config/jarvis_browser_profile/
+
+# Local memory/data persistence files (prevents pushing personal data)
+memory/long_term.json

@@ -1,0 +1,6 @@
+Ideias de Agentes:
+- Agente de Automação de WhatsApp (para controle remoto e mensagens)
+- Agente de Criação de Sites e SaaS (para automatizar o desenvolvimento)
+- Agente de Análise de Dados para Otimização de Negócios
+- Agente de Pesquisa de Mercado para Identificação de Oportunidades
+- Agente de Gestão de Projetos com IA

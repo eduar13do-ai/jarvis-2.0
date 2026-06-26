@@ -88,6 +88,37 @@ def _update_memory_async(user_text: str, jarvis_text: str) -> None:
         if "429" not in str(e):
             print(f"[Memory] ⚠️ {e}")
 
+
+def _clean_transcription(chunks: list[str]) -> str:
+    import re
+    
+    def normalize(w: str) -> str:
+        return re.sub(r'[^\w]', '', w.lower())
+        
+    cleaned = []
+    # Strip chunks and remove empty ones
+    chunks = [c.strip() for c in chunks if c.strip()]
+    
+    # Pre-calculate normalized word lists for each chunk
+    normalized_chunks = [[normalize(w) for w in c.split() if normalize(w)] for c in chunks]
+    
+    for i, norm_words in enumerate(normalized_chunks):
+        if not norm_words:  # If a chunk had only punctuation, skip it
+            continue
+        is_duplicate = False
+        for j in range(i + 1, len(normalized_chunks)):
+            subsequent_norm = normalized_chunks[j]
+            # Check if norm_words is a prefix of subsequent_norm at the word level
+            if len(norm_words) <= len(subsequent_norm):
+                if subsequent_norm[:len(norm_words)] == norm_words:
+                    is_duplicate = True
+                    break
+        if not is_duplicate:
+            cleaned.append(chunks[i])
+            
+    return " ".join(cleaned)
+
+
 TOOL_DECLARATIONS = [
     {
         "name": "open_app",
@@ -773,12 +804,12 @@ class JarvisLive:
                         if sc.turn_complete:
                             self.set_speaking(False)
 
-                            full_in = " ".join(in_buf).strip()
+                            full_in = _clean_transcription(in_buf)
                             if full_in:
                                 self.ui.write_log(f"You: {full_in}")
                             in_buf = []
 
-                            full_out = " ".join(out_buf).strip()
+                            full_out = _clean_transcription(out_buf)
                             if full_out:
                                 self.ui.write_log(f"Jarvis: {full_out}")
                             out_buf = []

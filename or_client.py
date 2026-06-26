@@ -24,49 +24,22 @@ def _load_api_key() -> str:
     try:
         with open(API_KEY_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
-        key = data.get("openrouter_api_key", "").strip()
-        if not key:
-            raise ValueError("openrouter_api_key is empty in api_keys.json")
-        return key
-    except FileNotFoundError:
-        raise RuntimeError(f"api_keys.json not found at: {API_KEY_PATH}")
-    except Exception as e:
-        raise RuntimeError(f"Failed to load OpenRouter API key: {e}")
+        return data.get("openrouter_api_key", "").strip()
+    except Exception:
+        return ""
 
 TEXT_MODELS: list[str] = [
-    "nvidia/nemotron-3-super-120b-a12b:free",
-    "nousresearch/hermes-3-llama-3.1-405b:free",
-    "minimax/minimax-m2.5:free",
+    "google/gemini-2.5-flash:free",
     "meta-llama/llama-3.3-70b-instruct:free",
-    "qwen/qwen3-next-80b-a3b-instruct:free",
-    "qwen/qwen3-coder:free",
-    "google/gemma-4-31b-it:free",
-    "google/gemma-4-26b-a4b-it:free",
-    "google/gemma-3-27b-it:free",
-    "arcee-ai/trinity-large-preview:free",
-    "z-ai/glm-4.5-air:free",
-    "nvidia/nemotron-3-nano-30b-a3b:free",
-    "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
-    "google/gemma-3-12b-it:free",
-    "nvidia/nemotron-nano-12b-v2-vl:free",
-    "nvidia/nemotron-nano-9b-v2:free",
-    "google/gemma-3-4b-it:free",
-    "google/gemma-3n-e4b-it:free",
+    "qwen/qwen-2.5-coder-32b-instruct:free",
+    "qwen/qwen-2.5-72b-instruct:free",
     "meta-llama/llama-3.2-3b-instruct:free",
-    "google/gemma-3n-e2b-it:free",
-    "liquid/lfm-2.5-1.2b-instruct:free",
-    "liquid/lfm-2.5-1.2b-thinking:free",
+    "microsoft/phi-3-medium-128k-instruct:free",
 ]
 
 VISION_MODELS: list[str] = [
-    "nvidia/nemotron-nano-12b-v2-vl:free",
-    "nvidia/llama-nemotron-embed-vl-1b-v2:free",
-    "google/gemma-4-31b-it:free",
-    "google/gemma-4-26b-a4b-it:free",
-    "google/gemma-3n-e4b-it:free",
-    "google/gemma-3n-e2b-it:free",
+    "google/gemini-2.5-flash:free",
     "meta-llama/llama-3.3-70b-instruct:free",
-    "nvidia/nemotron-3-super-120b-a12b:free",
 ]
 
 API_URL               = "https://openrouter.ai/api/v1/chat/completions"
@@ -82,7 +55,16 @@ _rate_limited: dict[str, float] = {}
 class OpenRouterClient:
 
     def __init__(self) -> None:
-        self.api_key  = _load_api_key()
+        self.api_key = ""
+        self.gemini_key = ""
+        try:
+            with open(API_KEY_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            self.api_key = data.get("openrouter_api_key", "").strip()
+            self.gemini_key = data.get("gemini_api_key", "").strip()
+        except Exception as e:
+            logger.warning(f"[OpenRouter] Could not pre-load api_keys.json: {e}")
+
         self._headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type":  "application/json",
@@ -163,6 +145,70 @@ class OpenRouterClient:
 
         return None
 
+    def _call_gemini_fallback(
+        self,
+        messages: list[dict],
+        max_tokens: int = DEFAULT_MAX_TOKENS,
+        temperature: float = DEFAULT_TEMPERATURE,
+    ) -> Optional[str]:
+        if not self.gemini_key:
+            logger.warning("[Fallback] No gemini_api_key available in config.")
+            return None
+        logger.info("[Fallback] Directing request to official Google Gemini API (gemini-2.5-flash)...")
+        try:
+            from google import genai
+            from google.genai import types
+            import base64
+            
+            client = genai.Client(api_key=self.gemini_key)
+            contents = []
+            system_instruction = ""
+            
+            for msg in messages:
+                role = msg.get("role")
+                content = msg.get("content")
+                if role == "system":
+                    system_instruction = content
+                    continue
+                
+                parts = []
+                if isinstance(content, str):
+                    parts.append(types.Part.from_text(text=content))
+                elif isinstance(content, list):
+                    for item in content:
+                        if item.get("type") == "text":
+                            parts.append(types.Part.from_text(text=item.get("text", "")))
+                        elif item.get("type") == "image_url":
+                            url = item.get("image_url", {}).get("url", "")
+                            if url.startswith("data:"):
+                                try:
+                                    header, base64_data = url.split(";base64,")
+                                    mime_type = header.split("data:")[1]
+                                    raw_bytes = base64.b64decode(base64_data)
+                                    parts.append(types.Part.from_bytes(data=raw_bytes, mime_type=mime_type))
+                                except Exception as img_err:
+                                    logger.error(f"[Fallback] Failed to parse base64 image: {img_err}")
+                
+                genai_role = "model" if role == "assistant" else "user"
+                contents.append(types.Content(role=genai_role, parts=parts))
+            
+            config = types.GenerateContentConfig(
+                temperature=temperature,
+                max_output_tokens=max_tokens,
+            )
+            if system_instruction:
+                config.system_instruction = system_instruction
+                
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=contents,
+                config=config
+            )
+            return response.text
+        except Exception as e:
+            logger.error(f"[Fallback] Gemini API call failed: {e}")
+            return None
+
     def _call_with_fallback(
         self,
         pool: list[str],
@@ -172,6 +218,15 @@ class OpenRouterClient:
         temperature: float = DEFAULT_TEMPERATURE,
         response_format: Optional[dict] = None,
     ) -> str:
+        # If no openrouter key is present, go straight to Gemini fallback
+        if not self.api_key:
+            logger.info("[OpenRouter] No OpenRouter API key found. Using Gemini fallback directly.")
+            result = self._call_gemini_fallback(messages, max_tokens, temperature)
+            if result:
+                return result
+            raise RuntimeError("Gemini fallback failed and no OpenRouter key is configured.")
+
+        # Otherwise try the models in the pool
         if model and not self._is_rate_limited(model):
             result = self._call(model, messages, max_tokens, temperature, response_format)
             if result:
@@ -189,6 +244,12 @@ class OpenRouterClient:
             if result:
                 logger.info(f"[OpenRouter] ✓ Success: {m}")
                 return result
+
+        # If everything failed, try Gemini fallback
+        logger.warning("[OpenRouter] All OpenRouter models failed/rate-limited. Trying Gemini fallback...")
+        result = self._call_gemini_fallback(messages, max_tokens, temperature)
+        if result:
+            return result
 
         raise RuntimeError(
             "[OpenRouter] All models failed or are rate-limited. "
@@ -335,9 +396,9 @@ if __name__ == "__main__":
     try:
         reply = client.chat("Introduce yourself in one sentence.")
         print(f"  Response : {reply}")
-        print(f"  Status   : PASS ✓")
+        print(f"  Status   : PASS (OK)")
     except Exception as e:
-        print(f"  Status   : FAIL ✗ — {e}")
+        print(f"  Status   : FAIL (ERROR) — {e}")
 
     print("\n[TEST 2] JSON mode...")
     try:
@@ -346,9 +407,9 @@ if __name__ == "__main__":
             system="Return only valid JSON. No extra text."
         )
         print(f"  Response : {data}")
-        print(f"  Status   : PASS ✓")
+        print(f"  Status   : PASS (OK)")
     except Exception as e:
-        print(f"  Status   : FAIL ✗ — {e}")
+        print(f"  Status   : FAIL (ERROR) — {e}")
 
     print("\n[TEST 3] Multi-turn conversation...")
     try:
@@ -360,16 +421,16 @@ if __name__ == "__main__":
         ]
         reply = client.multi_turn(history)
         print(f"  Response : {reply}")
-        print(f"  Status   : PASS ✓")
+        print(f"  Status   : PASS (OK)")
     except Exception as e:
-        print(f"  Status   : FAIL ✗ — {e}")
+        print(f"  Status   : FAIL (ERROR) — {e}")
 
     print("\n[TEST 4] Model pool info...")
     info = client.available_models()
     print(f"  Text models   : {info['total_text']}")
     print(f"  Vision models : {info['total_vision']}")
     print(f"  Rate limited  : {info['rate_limited'] or 'none'}")
-    print(f"  Status        : PASS ✓")
+    print(f"  Status        : PASS (OK)")
 
     print("\n" + "=" * 55)
     print("  All tests complete.")
